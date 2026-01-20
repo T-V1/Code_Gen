@@ -1,0 +1,429 @@
+DotnetUserAuthAPI/
+├── Controllers/
+│   └── AuthController.cs
+├── Models/
+│   └── User.cs
+├── DTOs/
+│   ├── RegisterRequestDto.cs
+│   ├── LoginRequestDto.cs
+│   ├── AuthResultDto.cs
+├── Services/
+│   ├── IUserService.cs
+│   └── UserService.cs
+├── Repository/
+│   ├── IUserRepository.cs
+│   └── UserRepository.cs
+├── wwwroot/
+│   ├── css/
+│   │   └── styles.css
+│   └── js/
+│       └── scripts.js
+├── appsettings.json
+├── Program.cs
+├── Startup.cs
+├── README.md
+
+**Controllers/AuthController.cs**
+```csharp
+using Microsoft.AspNetCore.Mvc;
+using DotnetUserAuthAPI.DTOs;
+using DotnetUserAuthAPI.Services;
+
+namespace DotnetUserAuthAPI.Controllers
+{
+    [ApiController]
+    [Route("api/auth")]
+    public class AuthController : ControllerBase
+    {
+        private readonly IUserService _userService;
+
+        public AuthController(IUserService userService)
+        {
+            _userService = userService;
+        }
+
+        [HttpPost("register")]
+        public IActionResult Register([FromBody] RegisterRequestDto request)
+        {
+            var result = _userService.Register(request);
+            if (!result.Success)
+            {
+                return StatusCode(result.StatusCode, result.Message);
+            }
+            return StatusCode(201, result.Message);
+        }
+
+        [HttpPost("login")]
+        public IActionResult Login([FromBody] LoginRequestDto request)
+        {
+            var result = _userService.Login(request);
+            if (!result.Success)
+            {
+                return StatusCode(result.StatusCode, result.Message);
+            }
+            return Ok(new { token = result.Token });
+        }
+    }
+}
+```
+
+**Models/User.cs**
+```csharp
+using System.ComponentModel.DataAnnotations;
+
+namespace DotnetUserAuthAPI.Models
+{
+    public class User
+    {
+        public int Id { get; set; }
+
+        [Required]
+        [MaxLength(50)]
+        public string FirstName { get; set; }
+
+        [Required]
+        [MaxLength(50)]
+        public string LastName { get; set; }
+
+        [Required]
+        [EmailAddress]
+        public string Email { get; set; }
+
+        [Required]
+        public string PasswordHash { get; set; }
+    }
+}
+```
+
+**DTOs/RegisterRequestDto.cs**
+```csharp
+using System.ComponentModel.DataAnnotations;
+
+namespace DotnetUserAuthAPI.DTOs
+{
+    public class RegisterRequestDto
+    {
+        [Required]
+        [MaxLength(50)]
+        public string FirstName { get; set; }
+
+        [Required]
+        [MaxLength(50)]
+        public string LastName { get; set; }
+
+        [Required]
+        [EmailAddress]
+        public string Email { get; set; }
+
+        [Required]
+        [MinLength(8)]
+        public string Password { get; set; }
+    }
+}
+```
+
+**DTOs/LoginRequestDto.cs**
+```csharp
+using System.ComponentModel.DataAnnotations;
+
+namespace DotnetUserAuthAPI.DTOs
+{
+    public class LoginRequestDto
+    {
+        [Required]
+        [EmailAddress]
+        public string Email { get; set; }
+
+        [Required]
+        public string Password { get; set; }
+    }
+}
+```
+
+**DTOs/AuthResultDto.cs**
+```csharp
+namespace DotnetUserAuthAPI.DTOs
+{
+    public class AuthResultDto
+    {
+        public bool Success { get; set; }
+        public string Message { get; set; }
+        public int StatusCode { get; set; }
+        public string Token { get; set; }
+    }
+}
+```
+
+**Services/IUserService.cs**
+```csharp
+using DotnetUserAuthAPI.DTOs;
+
+namespace DotnetUserAuthAPI.Services
+{
+    public interface IUserService
+    {
+        AuthResultDto Register(RegisterRequestDto request);
+        AuthResultDto Login(LoginRequestDto request);
+    }
+}
+```
+
+**Services/UserService.cs**
+```csharp
+using DotnetUserAuthAPI.DTOs;
+using DotnetUserAuthAPI.Models;
+using DotnetUserAuthAPI.Repository;
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+
+namespace DotnetUserAuthAPI.Services
+{
+    public class UserService : IUserService
+    {
+        private readonly IUserRepository _userRepository;
+        private readonly IConfiguration _configuration;
+
+        public UserService(IUserRepository userRepository, IConfiguration configuration)
+        {
+            _userRepository = userRepository;
+            _configuration = configuration;
+        }
+
+        public AuthResultDto Register(RegisterRequestDto request)
+        {
+            if (_userRepository.GetByEmail(request.Email) != null)
+            {
+                return new AuthResultDto { Success = false, Message = "Email already exists.", StatusCode = 400 };
+            }
+
+            var user = new User
+            {
+                FirstName = request.FirstName,
+                LastName = request.LastName,
+                Email = request.Email,
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password)
+            };
+
+            _userRepository.Add(user);
+
+            return new AuthResultDto { Success = true, Message = "Registration successful.", StatusCode = 201 };
+        }
+
+        public AuthResultDto Login(LoginRequestDto request)
+        {
+            var user = _userRepository.GetByEmail(request.Email);
+            if (user == null || !BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
+            {
+                return new AuthResultDto { Success = false, Message = "Invalid credentials.", StatusCode = 401 };
+            }
+
+            var token = GenerateJwtToken(user);
+
+            return new AuthResultDto { Success = true, Token = token, StatusCode = 200 };
+        }
+
+        private string GenerateJwtToken(User user)
+        {
+            var claims = new[]
+            {
+                new Claim(JwtRegisteredClaimNames.Sub, user.Email),
+                new Claim("id", user.Id.ToString())
+            };
+
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]));
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+            var token = new JwtSecurityToken(
+                issuer: _configuration["Jwt:Issuer"],
+                audience: _configuration["Jwt:Audience"],
+                claims: claims,
+                expires: DateTime.Now.AddHours(1),
+                signingCredentials: creds);
+
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+    }
+}
+```
+
+**Repository/IUserRepository.cs**
+```csharp
+using DotnetUserAuthAPI.Models;
+
+namespace DotnetUserAuthAPI.Repository
+{
+    public interface IUserRepository
+    {
+        User GetByEmail(string email);
+        void Add(User user);
+    }
+}
+```
+
+**Repository/UserRepository.cs**
+```csharp
+using DotnetUserAuthAPI.Models;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace DotnetUserAuthAPI.Repository
+{
+    public class UserRepository : IUserRepository
+    {
+        private static List<User> _users = new List<User>();
+
+        public User GetByEmail(string email)
+        {
+            return _users.FirstOrDefault(u => u.Email == email);
+        }
+
+        public void Add(User user)
+        {
+            user.Id = _users.Count + 1;
+            _users.Add(user);
+        }
+    }
+}
+```
+
+**wwwroot/css/styles.css**
+```css
+body { font-family: Arial, sans-serif; }
+```
+
+**wwwroot/js/scripts.js**
+```js
+// Placeholder JS file
+```
+
+**appsettings.json**
+```json
+{
+  "Jwt": {
+    "Key": "supersecretkey12345",
+    "Issuer": "DotnetUserAuthAPI",
+    "Audience": "DotnetUserAuthAPIUsers"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning",
+      "Microsoft.Hosting.Lifetime": "Information"
+    }
+  },
+  "AllowedHosts": "*"
+}
+```
+
+**Program.cs**
+```csharp
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Hosting;
+
+namespace DotnetUserAuthAPI
+{
+    public class Program
+    {
+        public static void Main(string[] args)
+        {
+            CreateHostBuilder(args).Build().Run();
+        }
+
+        public static IHostBuilder CreateHostBuilder(string[] args) =>
+            Host.CreateDefaultBuilder(args)
+                .ConfigureWebHostDefaults(webBuilder =>
+                {
+                    webBuilder.UseStartup<Startup>();
+                });
+    }
+}
+```
+
+**Startup.cs**
+```csharp
+using DotnetUserAuthAPI.Repository;
+using DotnetUserAuthAPI.Services;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+
+namespace DotnetUserAuthAPI
+{
+    public class Startup
+    {
+        public Startup(IConfiguration configuration)
+        {
+            Configuration = configuration;
+        }
+
+        public IConfiguration Configuration { get; }
+
+        public void ConfigureServices(IServiceCollection services)
+        {
+            services.AddControllers();
+            services.AddSingleton<IUserRepository, UserRepository>();
+            services.AddScoped<IUserService, UserService>();
+            services.AddSwaggerGen();
+        }
+
+        public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
+        {
+            if (env.IsDevelopment())
+            {
+                app.UseDeveloperExceptionPage();
+                app.UseSwagger();
+                app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "DotnetUserAuthAPI v1"));
+            }
+
+            app.UseRouting();
+            app.UseStaticFiles();
+            app.UseAuthorization();
+
+            app.UseEndpoints(endpoints =>
+            {
+                endpoints.MapControllers();
+            });
+        }
+    }
+}
+```
+
+**README.md**
+```markdown
+# DotnetUserAuthAPI
+
+## Overview
+
+ASP.NET Core Web API for user registration and login with JWT authentication.
+
+### Endpoints
+
+- `POST /api/auth/register` — Register a new user
+- `POST /api/auth/login` — Login and receive JWT token
+
+### Features
+
+- Password hashing (BCrypt)
+- JWT authentication
+- In-memory user repository
+- Clean architecture
+
+## Getting Started
+
+1. Install .NET 6 SDK
+2. Restore packages: `dotnet restore`
+3. Run: `dotnet run`
+4. Access Swagger UI at `/swagger`
+
+## Configuration
+
+Edit `appsettings.json` for JWT settings.
+
+## License
+
+MIT
+```
